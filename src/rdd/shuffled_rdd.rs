@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,13 +11,15 @@ use crate::dependency::{Dependency, ShuffleDependency};
 use crate::env;
 use crate::error::{Error, Result};
 use crate::partitioner::Partitioner;
-use crate::rdd::{Rdd, RddBase, RddVals};
+use crate::rdd::{ComputeResult, DataIter, Rdd, RddBase, RddVals};
 use crate::serializable_traits::{AnyData, Data};
 use crate::shuffle::ShuffleFetcher;
 use crate::split::Split;
 use crate::utils::yield_tokio_futures;
 use dashmap::DashMap;
+use futures::{FutureExt, Stream, StreamExt};
 use log::info;
+use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -117,28 +120,18 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> RddBase for ShuffledRdd<K, V, C> {
         Some(self.part.clone())
     }
 
-    fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    fn iterator_any(&self, split: Box<dyn Split>) -> DataIter {
         log::debug!("inside iterator_any shuffledrdd",);
-        Ok(Box::new(
-            self.iterator(split)?
-                .map(|(k, v)| Box::new((k, v)) as Box<dyn AnyData>),
-        ))
+        super::_iterator_any_tuple(self.get_rdd(), split)
     }
 
-    fn cogroup_iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    fn cogroup_iterator_any(&self, split: Box<dyn Split>) -> DataIter {
         log::debug!("inside cogroup iterator_any shuffledrdd",);
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
-        })))
+        super::_cogroup_iterator_any(self.get_rdd(), split)
     }
 }
 
+#[async_trait::async_trait]
 impl<K: Data + Eq + Hash, V: Data, C: Data> Rdd for ShuffledRdd<K, V, C> {
     type Item = (K, C);
 
@@ -150,7 +143,7 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> Rdd for ShuffledRdd<K, V, C> {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    async fn compute(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>> {
         log::debug!("compute inside shuffled rdd");
         let combiners: Arc<DashMap<K, Option<C>>> = Arc::new(DashMap::new());
         let mut comb_clone = combiners.clone();
@@ -167,18 +160,8 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> Rdd for ShuffledRdd<K, V, C> {
         };
 
         let start = Instant::now();
-
-        let shuffle_id = self.shuffle_id;
-        let split_idx = split.get_index();
-        let executor = env::Env::get_async_handle();
-        executor.enter(|| -> Result<()> {
-            let fut = ShuffleFetcher::fetch(shuffle_id, split_idx, merge_pair);
-            Ok(futures::executor::block_on(fut)?)
-        })?;
-
+        ShuffleFetcher::fetch(self.shuffle_id, split.get_index(), merge_pair).await;
         log::debug!("time taken for fetching {}", start.elapsed().as_millis());
-
-        let combiners = Arc::try_unwrap(combiners).unwrap();
         Ok(Box::new(
             combiners.into_iter().map(|(k, v)| (k, v.unwrap())),
         ))

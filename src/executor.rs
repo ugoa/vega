@@ -25,7 +25,7 @@ const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
     nesting_limit: 64,
 };
 
-pub struct Executor {
+pub(crate) struct Executor {
     port: u16,
 }
 

@@ -38,6 +38,7 @@ pub trait TaskBase: Downcast + Send + Sync {
         None
     }
 }
+
 impl_downcast!(TaskBase);
 
 impl PartialOrd for dyn TaskBase {
@@ -60,13 +61,14 @@ impl Ord for dyn TaskBase {
     }
 }
 
+#[async_trait::async_trait]
 pub trait Task: TaskBase + Send + Sync + Downcast {
-    fn run(&self, id: usize) -> serde_traitobject::Box<dyn serde_traitobject::Any + Send + Sync>;
+    async fn run(&self, id: usize) -> SerBox<dyn SerAny + Send + Sync>;
 }
+
 impl_downcast!(Task);
 
 pub trait TaskBox: Task + Serialize + Deserialize + 'static + Downcast {}
-
 impl<K> TaskBox for K where K: Task + Serialize + Deserialize + 'static {}
 
 impl_downcast!(TaskBox);
@@ -96,30 +98,32 @@ impl From<ShuffleMapTask> for TaskOption {
 
 #[derive(Serialize, Deserialize)]
 pub enum TaskResult {
-    //    //    #[serde(with = "serde_traitobject")]
-    ResultTask(serde_traitobject::Box<dyn serde_traitobject::Any + Send + Sync>),
-    ShuffleTask(serde_traitobject::Box<dyn serde_traitobject::Any + Send + Sync>),
+    ResultTask(SerBox<dyn SerAny + Send + Sync>),
+    ShuffleTask(SerBox<dyn SerAny + Send + Sync>),
 }
-//
+
 impl TaskOption {
-    pub fn run(&self, id: usize) -> TaskResult {
+    pub async fn run(&self, id: usize) -> TaskResult {
         match self {
-            TaskOption::ResultTask(tsk) => TaskResult::ResultTask(tsk.run(id)),
-            TaskOption::ShuffleMapTask(tsk) => TaskResult::ShuffleTask(tsk.run(id)),
+            TaskOption::ResultTask(tsk) => TaskResult::ResultTask(tsk.run(id).await),
+            TaskOption::ShuffleMapTask(tsk) => TaskResult::ShuffleTask(tsk.run(id).await),
         }
     }
+
     pub fn get_task_id(&self) -> usize {
         match self {
             TaskOption::ResultTask(tsk) => tsk.get_task_id(),
             TaskOption::ShuffleMapTask(tsk) => tsk.get_task_id(),
         }
     }
+
     pub fn get_run_id(&self) -> usize {
         match self {
             TaskOption::ResultTask(tsk) => tsk.get_run_id(),
             TaskOption::ShuffleMapTask(tsk) => tsk.get_run_id(),
         }
     }
+
     pub fn get_stage_id(&self) -> usize {
         match self {
             TaskOption::ResultTask(tsk) => tsk.get_stage_id(),

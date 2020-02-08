@@ -217,8 +217,8 @@ impl LocalScheduler {
         self.event_queues.get_mut(&run_id).unwrap().pop_front()
     }
 
-    fn run_task<T: Data, U: Data, F>(
-        event_queues: Arc<DashMap<usize, VecDeque<CompletionEvent>>>,
+    async fn run_task<T: Data, U: Data, F>(
+        event_queues: Arc<Mutex<HashMap<usize, VecDeque<CompletionEvent>>>>,
         task: Vec<u8>,
         id_in_job: usize,
         attempt_id: usize,
@@ -226,7 +226,7 @@ impl LocalScheduler {
         F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
     {
         let des_task: TaskOption = bincode::deserialize(&task).unwrap();
-        let result = des_task.run(attempt_id);
+        let result = des_task.run(attempt_id).await;
         match des_task {
             TaskOption::ResultTask(tsk) => {
                 let result = match result {

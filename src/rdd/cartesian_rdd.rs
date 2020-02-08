@@ -1,14 +1,16 @@
-use itertools::{iproduct, Itertools};
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::context::Context;
 use crate::dependency::Dependency;
 use crate::error::{Error, Result};
-use crate::rdd::{Rdd, RddBase, RddVals};
+use crate::rdd::{ComputeResult, DataIter, Rdd, RddBase, RddVals};
 use crate::serializable_traits::{AnyData, Data};
 use crate::split::Split;
+use itertools::{iproduct, Itertools};
+use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
-use std::marker::PhantomData;
-use std::sync::Arc;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct CartesianSplit {
@@ -102,17 +104,12 @@ impl<T: Data, U: Data> RddBase for CartesianRdd<T, U> {
         array
     }
 
-    default fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
-        Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
-        ))
+    fn iterator_any(&self, split: Box<dyn Split>) -> DataIter {
+        super::_iterator_any(self.get_rdd(), split)
     }
 }
 
+#[async_trait::async_trait]
 impl<T: Data, U: Data> Rdd for CartesianRdd<T, U> {
     type Item = (T, U);
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>>
@@ -126,14 +123,16 @@ impl<T: Data, U: Data> Rdd for CartesianRdd<T, U> {
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    async fn compute(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>> {
         let current_split = split
             .downcast::<CartesianSplit>()
             .or(Err(Error::DowncastFailure("CartesianSplit")))?;
-
-        let iter1 = self.rdd1.iterator(current_split.s1)?;
-        // required because iter2 must be clonable:
-        let iter2: Vec<_> = self.rdd2.iterator(current_split.s2)?.collect();
-        Ok(Box::new(iter1.cartesian_product(iter2.into_iter())))
+        let iter1 = self.rdd1.iterator(current_split.s1).await?;
+        let iter2 = self
+            .rdd2
+            .iterator(current_split.s2)
+            .await?
+            .collect::<Vec<_>>();
+        Ok(Box::new(iter1.cartesian_product(iter2)))
     }
 }

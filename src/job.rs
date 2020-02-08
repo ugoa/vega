@@ -14,6 +14,7 @@ use std::thread;
 use std::time;
 use std::time::{Duration, Instant};
 
+use crate::env;
 use crate::rdd::Rdd;
 use crate::scheduler::NativeScheduler;
 use crate::serializable_traits::{Data, SerFunc};

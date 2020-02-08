@@ -13,10 +13,11 @@ name = "native_spark"
 aws_connectors = ["rusoto_core", "rusoto_s3"]
 
 [dependencies]
+async-trait = "0.1.24"
 crossbeam = "0.7.3"
 dashmap = "^3.5.1"
 fasthash = "0.4.0"
-futures = "0.3"
+futures = "^0.3.4"
 hyper = "0.13.2"
 http = "0.2.0"
 itertools = "0.8.2"
@@ -68,4 +69,3 @@ async-std = { version = "1.5.0", features = ["attributes"] }
 chrono = "0.4.10"
 parquet = "0.15.1"
 tempfile = "3"
-tokio = { version = "^0.2", features = ["macros"] }

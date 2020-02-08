@@ -1,14 +1,17 @@
 use std::cmp::Ordering;
 use std::fs;
+use std::future::Future;
 use std::hash::Hash;
 use std::io::{BufWriter, Write};
 use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc};
 
 use crate::context::Context;
 use crate::dependency::{Dependency, OneToOneDependency};
+use crate::env;
 use crate::error::{Error, Result};
 use crate::partitioner::{HashPartitioner, Partitioner};
 use crate::serializable_traits::{AnyData, Data, Func, SerFunc};
@@ -18,29 +21,31 @@ use crate::utils;
 use crate::utils::random::{BernoulliSampler, PoissonSampler, RandomSampler};
 use fasthash::MetroHasher;
 use log::info;
+use parking_lot::Mutex;
 use rand::{Rng, SeedableRng};
 use serde_derive::{Deserialize, Serialize};
 use serde_traitobject::{Arc as SerArc, Deserialize, Serialize};
+use tokio::task::JoinHandle;
 
 pub mod parallel_collection_rdd;
 pub use parallel_collection_rdd::*;
-pub mod cartesian_rdd;
-pub use cartesian_rdd::*;
-pub mod co_grouped_rdd;
-pub use co_grouped_rdd::*;
-pub mod coalesced_rdd;
-pub use coalesced_rdd::*;
-pub mod mapper_rdd;
-pub use mapper_rdd::*;
-pub mod flatmap_rdd;
+mod cartesian_rdd;
+mod flatmap_rdd;
 pub use flatmap_rdd::*;
+mod mapper_rdd;
+pub use cartesian_rdd::*;
+pub use mapper_rdd::*;
+mod co_grouped_rdd;
+pub use co_grouped_rdd::*;
+mod coalesced_rdd;
+pub use coalesced_rdd::*;
 pub mod pair_rdd;
 pub use pair_rdd::*;
-pub mod partitionwise_sampled_rdd;
+mod partitionwise_sampled_rdd;
 pub use partitionwise_sampled_rdd::*;
-pub mod shuffled_rdd;
+mod shuffled_rdd;
 pub use shuffled_rdd::*;
-pub mod map_partitions_rdd;
+mod map_partitions_rdd;
 pub use map_partitions_rdd::*;
 pub mod zip_rdd;
 pub use zip_rdd::*;
@@ -73,35 +78,80 @@ impl RddVals {
     }
 }
 
-// Due to the lack of HKTs in Rust, it is difficult to have collection of generic data with different types.
+pub type ComputeResult<R> = Box<dyn Iterator<Item = R> + Send>;
+pub type DataIter = Pin<Box<dyn futures::Future<Output = InternalDataIter> + Send>>;
+type InternalDataIter = Box<dyn Iterator<Item = Box<dyn AnyData>>>;
+
+/// This is built as an orphan function because circular dependency between RddBase and Rdd.
+///
+/// Calls `iterator` from Rdd and downcasts to AnyData. All this while keeping the futures
+/// invariants for the compiler happy.
+pub(crate) fn _iterator_any<D: Data>(
+    rdd: Arc<dyn Rdd<Item = D>>,
+    split: Box<dyn Split>,
+) -> DataIter {
+    Box::pin(async move {
+        let it = rdd.iterator(split).await.unwrap();
+        Box::new(it.map(|x| Box::new(x) as Box<dyn AnyData>)) as InternalDataIter
+    })
+}
+
+/// Specialized version of `iterator_any` where the serializable data is a touple of two elements.
+fn _iterator_any_tuple<K: Data, V: Data>(
+    rdd: Arc<dyn Rdd<Item = (K, V)>>,
+    split: Box<dyn Split>,
+) -> DataIter {
+    Box::pin(async move {
+        let it = rdd.iterator(split).await.unwrap();
+        Box::new(it.map(|(k, v)| Box::new((k, v)) as Box<dyn AnyData>)) as InternalDataIter
+    })
+}
+
+/// See `iterator_any`, ditto the same for co-grouped data.
+pub(crate) fn _cogroup_iterator_any<K: Data, V: Data>(
+    rdd: Arc<dyn Rdd<Item = (K, V)>>,
+    split: Box<dyn Split>,
+) -> DataIter {
+    Box::pin(async move {
+        let it = rdd.iterator(split).await.unwrap();
+        Box::new(
+            it.map(|(k, v)| Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>),
+        ) as InternalDataIter
+    })
+}
+
+// Due to the lack of HKTs in Rust, it is difficult to have a collection of generic data with different types.
 // Required for storing multiple RDDs inside dependencies and other places like Tasks, etc.,
-// Refactored RDD trait into two traits one having RddBase trait which contains only non generic methods which provide information for dependency lists
-// Another separate Rdd containing generic methods like map, etc.,
+// Refactored RDD trait into two traits one having RddBase trait which contains only non generic methods
+// which provide information for dependency lists and Another separate Rdd containing generic methods like map, etc.,
 pub trait RddBase: Send + Sync + Serialize + Deserialize {
     fn get_rdd_id(&self) -> usize;
+
     fn get_context(&self) -> Arc<Context>;
+
     fn get_dependencies(&self) -> Vec<Dependency>;
+
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
         Vec::new()
     }
+
     fn partitioner(&self) -> Option<Box<dyn Partitioner>> {
         None
     }
+
     fn splits(&self) -> Vec<Box<dyn Split>>;
+
     fn number_of_splits(&self) -> usize {
         self.splits().len()
     }
+
     // Analyse whether this is required or not. It requires downcasting while executing tasks which could hurt performance.
-    fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>>;
-    fn cogroup_iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    fn iterator_any(&self, split: Box<dyn Split>) -> DataIter;
+
+    fn cogroup_iterator_any(&self, split: Box<dyn Split>) -> DataIter {
         self.iterator_any(split)
     }
+
     fn is_pinned(&self) -> bool {
         false
     }
@@ -140,38 +190,41 @@ impl<I: Rdd + ?Sized> RddBase for serde_traitobject::Arc<I> {
     fn splits(&self) -> Vec<Box<dyn Split>> {
         (**self).get_rdd_base().splits()
     }
-    fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    fn iterator_any(&self, split: Box<dyn Split>) -> DataIter {
         (**self).get_rdd_base().iterator_any(split)
     }
 }
 
+#[async_trait::async_trait]
 impl<I: Rdd + ?Sized> Rdd for serde_traitobject::Arc<I> {
     type Item = I::Item;
+
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
         (**self).get_rdd()
     }
+
     fn get_rdd_base(&self) -> Arc<dyn RddBase> {
         (**self).get_rdd_base()
     }
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        (**self).compute(split)
+
+    async fn compute(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>> {
+        (**self).compute(split).await
     }
 }
 
 // Rdd containing methods associated with processing
+#[async_trait::async_trait]
 pub trait Rdd: RddBase + 'static {
     type Item: Data;
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>>;
 
     fn get_rdd_base(&self) -> Arc<dyn RddBase>;
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>>;
+    /// Returns an asynchonous computation task for a given partition.
+    async fn compute(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>>;
 
-    fn iterator(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        self.compute(split)
+    async fn iterator(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>> {
+        self.compute(split).await
     }
 
     fn map<U: Data, F>(&self, f: F) -> SerArc<dyn Rdd<Item = U>>
@@ -182,31 +235,36 @@ pub trait Rdd: RddBase + 'static {
         SerArc::new(MapperRdd::new(self.get_rdd(), f))
     }
 
-    fn flat_map<U: Data, F>(&self, f: F) -> SerArc<dyn Rdd<Item = U>>
+    fn flat_map<U: Data, F>(&self, f: F) -> SerArc<dyn Rdd<Item = U> + Send>
     where
-        F: SerFunc(Self::Item) -> Box<dyn Iterator<Item = U>>,
+        F: SerFunc(Self::Item) -> Box<dyn Iterator<Item = U> + Send>,
         Self: Sized,
     {
         SerArc::new(FlatMapperRdd::new(self.get_rdd(), f))
     }
 
     /// Return a new RDD by applying a function to each partition of this RDD.
-    fn map_partitions<U: Data, F>(&self, func: F) -> SerArc<dyn Rdd<Item = U>>
+    fn map_partitions<U: Data, F>(&self, func: F) -> SerArc<dyn Rdd<Item = U> + Send>
     where
-        F: SerFunc(Box<dyn Iterator<Item = Self::Item>>) -> Box<dyn Iterator<Item = U>>,
+        F: SerFunc(
+            Box<dyn Iterator<Item = Self::Item> + Send>,
+        ) -> Box<dyn Iterator<Item = U> + Send>,
         Self: Sized,
     {
         let ignore_idx = Fn!(move |_index: usize,
-                                   items: Box<dyn Iterator<Item = Self::Item>>|
-              -> Box<dyn Iterator<Item = _>> { (func)(items) });
+                                   items: Box<dyn Iterator<Item = Self::Item> + Send>|
+              -> Box<dyn Iterator<Item = _> + Send> { (func)(items) });
         SerArc::new(MapPartitionsRdd::new(self.get_rdd(), ignore_idx))
     }
 
     /// Return a new RDD by applying a function to each partition of this RDD,
     /// while tracking the index of the original partition.
-    fn map_partitions_with_index<U: Data, F>(&self, f: F) -> SerArc<dyn Rdd<Item = U>>
+    fn map_partitions_with_index<U: Data, F>(&self, f: F) -> SerArc<dyn Rdd<Item = U> + Send>
     where
-        F: SerFunc(usize, Box<dyn Iterator<Item = Self::Item>>) -> Box<dyn Iterator<Item = U>>,
+        F: SerFunc(
+            usize,
+            Box<dyn Iterator<Item = Self::Item> + Send>,
+        ) -> Box<dyn Iterator<Item = U> + Send>,
         Self: Sized,
     {
         SerArc::new(MapPartitionsRdd::new(self.get_rdd(), f))
@@ -219,10 +277,10 @@ pub trait Rdd: RddBase + 'static {
         Self: Sized,
     {
         let func = Fn!(
-            |_index: usize, iter: Box<dyn Iterator<Item = Self::Item>>| Box::new(std::iter::once(
-                iter.collect::<Vec<_>>()
-            ))
-                as Box<Iterator<Item = Vec<Self::Item>>>
+            |_index: usize, iter: Box<dyn Iterator<Item = Self::Item> + Send>| Box::new(
+                std::iter::once(iter.collect::<Vec<_>>())
+            )
+                as Box<dyn Iterator<Item = Vec<Self::Item>> + Send>
         );
         SerArc::new(MapPartitionsRdd::new(self.get_rdd(), Box::new(func)))
     }
@@ -366,20 +424,21 @@ pub trait Rdd: RddBase + 'static {
         if shuffle {
             // Distributes elements evenly across output partitions, starting from a random partition.
             use std::hash::Hasher;
-            let distributed_partition = Fn!(
-                move |index: usize, items: Box<dyn Iterator<Item = Self::Item>>| {
-                    let mut hasher = MetroHasher::default();
-                    index.hash(&mut hasher);
-                    let mut rand = utils::random::get_default_rng_from_seed(hasher.finish());
-                    let mut position = rand.gen_range(0, num_partitions);
-                    Box::new(items.map(move |t| {
-                        // Note that the hash code of the key will just be the key itself.
-                        // The HashPartitioner will mod it with the number of total partitions.
-                        position += 1;
-                        (position, t)
-                    })) as Box<dyn Iterator<Item = (usize, Self::Item)>>
-                }
-            );
+            let distributed_partition = Fn!(move |index: usize,
+                                                  items: Box<
+                dyn Iterator<Item = Self::Item> + Send,
+            >| {
+                let mut hasher = MetroHasher::default();
+                index.hash(&mut hasher);
+                let mut rand = utils::random::get_default_rng_from_seed(hasher.finish());
+                let mut position = rand.gen_range(0, num_partitions);
+                Box::new(items.map(move |t| {
+                    // Note that the hash code of the key will just be the key itself.
+                    // The HashPartitioner will mod it with the number of total partitions.
+                    position += 1;
+                    (position, t)
+                })) as Box<dyn Iterator<Item = (usize, Self::Item)> + Send>
+            });
 
             let map_steep: SerArc<dyn Rdd<Item = (usize, Self::Item)>> =
                 SerArc::new(MapPartitionsRdd::new(self.get_rdd(), distributed_partition));
@@ -724,39 +783,33 @@ pub trait Rdd: RddBase + 'static {
                 |x: Self::Item| -> (Self::Item, Option<Self::Item>) { (x, None) }
             )))
             .clone();
-        self.map(
-            Box::new(Fn!(
-                    |x| -> (Self::Item, Option<Self::Item>){
-                        (x, None)
-                    }
-                )
-            )
-        ).cogroup(
+        self.map(Box::new(Fn!(|x| -> (Self::Item, Option<Self::Item>) {
+            (x, None)
+        })))
+        .cogroup(
             other,
-            Box::new(HashPartitioner::<Self::Item>::new(num_splits)) as Box<dyn Partitioner>
-        ).map(
-            Box::new(
-                Fn!(
-                    |(x, (v1, v2)): (Self::Item, (Vec::<Option<Self::Item>>, Vec::<Option<Self::Item>>))| -> Option<Self::Item> {
-                        if v1.len() >= 1 && v2.len() >= 1 {
-                            Some(x)
-                        } else {
-                            None
-                        }
-                    }
-                )
-            )
-        ).map_partitions(
-            Box::new(
-                Fn!(
-                    |iter: Box<dyn Iterator<Item=Option<Self::Item>>>| -> Box<dyn Iterator<Item=Self::Item>> {
-                        Box::new(
-                            iter.filter(|x| x.is_some()).map(|x| x.unwrap())
-                        ) as Box<dyn Iterator<Item=Self::Item>>
-                    }
-                )
-            )
+            Box::new(HashPartitioner::<Self::Item>::new(num_splits)) as Box<dyn Partitioner>,
         )
+        .map(Box::new(Fn!(|(x, (v1, v2)): (
+            Self::Item,
+            (Vec::<Option<Self::Item>>, Vec::<Option<Self::Item>>)
+        )|
+         -> Option<Self::Item> {
+            if v1.len() >= 1 && v2.len() >= 1 {
+                Some(x)
+            } else {
+                None
+            }
+        })))
+        .map_partitions(Box::new(Fn!(|iter: Box<
+            dyn Iterator<Item = Option<Self::Item>> + Send,
+        >|
+         -> Box<
+            dyn Iterator<Item = Self::Item> + Send,
+        > {
+            Box::new(iter.filter(|x| x.is_some()).map(|x| x.unwrap()))
+                as Box<dyn Iterator<Item = Self::Item> + Send>
+        })))
     }
 }
 

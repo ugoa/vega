@@ -1,14 +1,18 @@
+//! This module implements parallel collection RDD for dividing the input collection for parallel processing.
+
+use std::hash::Hash;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use crate::context::Context;
 use crate::dependency::Dependency;
 use crate::error::Result;
-use crate::rdd::{Rdd, RddBase, RddVals};
+use crate::rdd::{ComputeResult, DataIter, Rdd, RddBase, RddVals};
 use crate::serializable_traits::{AnyData, Data};
 use crate::split::Split;
 use log::info;
+use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
-use std::hash::Hash;
-use std::sync::Arc;
-// This module implements parallel collection RDD for dividing the input collection for parallel processing
 
 /// A collection of objects which can be sliced into partitions with a partitioning function.
 pub trait Chunkable<D>
@@ -47,16 +51,11 @@ impl<T: Data> ParallelCollectionSplit<T> {
             values,
         }
     }
-    // Lot of unnecessary cloning is there. Have to refactor for better performance
-    fn iterator(&self) -> Box<dyn Iterator<Item = T>> {
+
+    fn iterator(&self) -> Box<dyn Iterator<Item = T> + Send> {
         let data = self.values.clone();
         let len = data.len();
         Box::new((0..len).map(move |i| data[i].clone()))
-        //        let res = res.collect::<Vec<_>>();
-        //        let log_output = format!("inside iterator maprdd {:?}", res.get(0));
-        //        env::log_file.lock().write(&log_output.as_bytes());
-        //        Box::new(res.into_iter()) as Box<Iterator<Item = T>>
-        //        Box::new(self.values.clone().into_iter())
     }
 }
 
@@ -65,7 +64,6 @@ pub struct ParallelCollectionVals<T> {
     vals: Arc<RddVals>,
     #[serde(skip_serializing, skip_deserializing)]
     context: Arc<Context>,
-    //    data: Option<Vec<T>>,
     splits_: Vec<Arc<Vec<T>>>,
     num_slices: usize,
 }
@@ -143,22 +141,7 @@ impl<T: Data> ParallelCollection<T> {
             }
             output.push(Arc::new(tmp.drain(..).collect::<Vec<_>>()));
             output
-            //            data.chunks(num_slices)
-            //                .map(|x| Arc::new(x.to_vec()))
-            //                .collect()
         }
-    }
-}
-
-impl<K: Data, V: Data> RddBase for ParallelCollection<(K, V)> {
-    fn cogroup_iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
-        log::debug!("inside iterator_any parallel collection",);
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
-        })))
     }
 }
 
@@ -188,25 +171,24 @@ impl<T: Data> RddBase for ParallelCollection<T> {
         self.rdd_vals.splits_.len()
     }
 
-    default fn cogroup_iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    default fn cogroup_iterator_any(&self, split: Box<dyn Split>) -> DataIter {
         self.iterator_any(split)
     }
 
-    default fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    fn iterator_any(&self, split: Box<dyn Split>) -> DataIter {
         log::debug!("inside iterator_any parallel collection",);
-        Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
-        ))
+        super::_iterator_any(self.get_rdd(), split)
     }
 }
 
+impl<K: Data, V: Data> RddBase for ParallelCollection<(K, V)> {
+    fn cogroup_iterator_any(&self, split: Box<dyn Split>) -> DataIter {
+        log::debug!("inside iterator_any parallel collection",);
+        super::_cogroup_iterator_any(self.get_rdd(), split)
+    }
+}
+
+#[async_trait::async_trait]
 impl<T: Data> Rdd for ParallelCollection<T> {
     type Item = T;
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
@@ -219,9 +201,10 @@ impl<T: Data> Rdd for ParallelCollection<T> {
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        if let Some(s) = split.downcast_ref::<ParallelCollectionSplit<T>>() {
-            Ok(s.iterator())
+    async fn compute(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>> {
+        if let Some(split) = split.downcast_ref::<ParallelCollectionSplit<T>>() {
+            let iter = split.iterator();
+            Ok(iter)
         } else {
             panic!(
                 "Got split object from different concrete type other than ParallelCollectionSplit"
@@ -229,5 +212,3 @@ impl<T: Data> Rdd for ParallelCollection<T> {
         }
     }
 }
-
-//impl<K: Data + Eq + Hash, V: Data + Eq + Hash> PairRdd<K, V> for ParallelCollection<(K, V)> {}

@@ -2,22 +2,23 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
 use std::net::Ipv4Addr;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering as SyncOrd};
 use std::sync::Arc;
 
+use crate::context::Context;
+use crate::dependency::{Dependency, NarrowDependencyTrait};
+use crate::error::{Error, Result};
+use crate::rdd::{ComputeResult, DataIter, Rdd, RddBase, RddVals};
+use crate::serializable_traits::{AnyData, Data};
+use crate::split::Split;
+use crate::utils;
+use futures::stream::StreamExt;
 use parking_lot::Mutex;
 use rand::Rng;
 use serde_derive::{Deserialize, Serialize};
 use serde_traitobject::{Arc as SerArc, Box as SerBox, Deserialize, Serialize};
-
-use crate::context::Context;
-use crate::dependency::{Dependency, NarrowDependencyTrait};
-use crate::error::{Error, Result};
-use crate::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
-use crate::split::Split;
-use crate::utils;
 
 /// Class that captures a coalesced RDD by essentially keeping track of parent partitions.
 #[derive(Serialize, Deserialize, Clone)]
@@ -189,17 +190,12 @@ impl<T: Data> RddBase for CoalescedRdd<T> {
         }
     }
 
-    default fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
-        Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
-        ))
+    fn iterator_any(&self, split: Box<dyn Split>) -> DataIter {
+        super::_iterator_any(self.get_rdd(), split)
     }
 }
 
+#[async_trait::async_trait]
 impl<T: Data> Rdd for CoalescedRdd<T> {
     type Item = T;
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>>
@@ -213,7 +209,7 @@ impl<T: Data> Rdd for CoalescedRdd<T> {
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    async fn compute(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>> {
         let split = CoalescedRddSplit::downcasting(split);
         let mut iter = Vec::new();
         for (_, p) in self
@@ -223,10 +219,11 @@ impl<T: Data> Rdd for CoalescedRdd<T> {
             .enumerate()
             .filter(|(i, _)| split.parent_indices.contains(i))
         {
-            let it = self.parent.iterator(p)?;
-            iter.push(it);
+            self.parent.iterator(p).await?.for_each(|e| {
+                iter.push(e);
+            })
         }
-        Ok(Box::new(iter.into_iter().flatten()) as Box<dyn Iterator<Item = Self::Item>>)
+        Ok(Box::new(iter.into_iter()))
     }
 }
 

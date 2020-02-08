@@ -14,6 +14,7 @@ use crate::serializable_traits::{Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
 use crate::stage::Stage;
 use crate::task::{TaskBase, TaskContext, TaskOption};
+use futures::stream::StreamExt;
 use log::{error, info};
 
 pub trait Scheduler {
@@ -46,9 +47,9 @@ pub(crate) trait NativeScheduler {
                 let task_context = TaskContext::new(jt.final_stage.id, jt.output_parts[0], 0);
                 Ok(Some(vec![(&jt.func)((
                     task_context,
-                    jt.final_rdd.iterator(split)?,
+                    jt.final_rdd.iterator(split).await?,
                 ))]))
-            }))
+            })
         } else {
             Ok(None)
         }

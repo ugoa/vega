@@ -7,8 +7,9 @@ use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
 
+use super::Result;
+use super::StdResult;
 use crate::env;
-use crate::error::StdResult;
 use crate::shuffle::*;
 use crossbeam::channel as cb_channel;
 use futures::future;
@@ -22,8 +23,6 @@ use serde_derive::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::time::delay_for;
 use uuid::Uuid;
-
-pub(crate) type Result<T> = StdResult<T, ShuffleError>;
 
 /// Creates directories and files required for storing shuffle data.
 /// It also creates the file server required for serving files via HTTP request.
@@ -109,30 +108,32 @@ impl ShuffleManager {
 
     fn launch_async_server(bind_ip: Ipv4Addr, bind_port: u16) -> Result<()> {
         let (s, r) = cb_channel::bounded::<Result<()>>(1);
-        thread::spawn(move || {
-            match tokio::runtime::Builder::new()
-                .enable_all()
-                .threaded_scheduler()
-                .build()
-                .map_err(|_| ShuffleError::AsyncRuntimeError)
-            {
-                Err(err) => {
-                    s.send(Err(err));
-                }
-                Ok(mut rt) => {
-                    if let Err(err) = rt.block_on(async move {
-                        let bind_addr = SocketAddr::from((bind_ip, bind_port));
-                        Server::try_bind(&bind_addr.clone())
-                            .map_err(|_| crate::NetworkError::FreePortNotFound(bind_port, 0))?
-                            .serve(ShuffleSvcMaker)
-                            .await
-                            .map_err(|_| ShuffleError::FailedToStart)
-                    }) {
+        thread::Builder::new()
+            .name(format!("{}_shuffle_server", env::THREAD_PREFIX))
+            .spawn(move || {
+                match tokio::runtime::Builder::new()
+                    .enable_all()
+                    .threaded_scheduler()
+                    .build()
+                    .map_err(|_| ShuffleError::AsyncRuntimeError)
+                {
+                    Err(err) => {
                         s.send(Err(err));
-                    };
+                    }
+                    Ok(mut rt) => {
+                        if let Err(err) = rt.block_on(async move {
+                            let bind_addr = SocketAddr::from((bind_ip, bind_port));
+                            Server::try_bind(&bind_addr.clone())
+                                .map_err(|_| ShuffleError::FreePortNotFound(bind_port))?
+                                .serve(ShuffleSvcMaker)
+                                .await
+                                .map_err(|_| ShuffleError::FailedToStart)
+                        }) {
+                            s.send(Err(err));
+                        };
+                    }
                 }
-            }
-        });
+            });
         cb_channel::select! {
             recv(r) -> msg => { msg.map_err(|_| ShuffleError::FailedToStart)??; }
             // wait a prudential time to check that initialization is ok and the move on
