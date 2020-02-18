@@ -1,16 +1,12 @@
+use std::convert::TryFrom;
 use std::fs::File;
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
-use crate::serialized_data_capnp::serialized_data;
-use capnp::serialize_packed;
-use log::error;
-use simplelog::*;
-use uuid::Uuid;
 
 use crate::distributed_scheduler::DistributedScheduler;
 use crate::error::{Error, Result};
@@ -22,8 +18,13 @@ use crate::rdd::union_rdd::UnionRdd;
 use crate::rdd::{Rdd, RddBase};
 use crate::scheduler::NativeScheduler;
 use crate::serializable_traits::{Data, SerFunc};
+use crate::serialized_data_capnp::serialized_data;
 use crate::task::TaskContext;
 use crate::{env, hosts};
+use capnp::serialize_packed;
+use log::error;
+use simplelog::*;
+use uuid::Uuid;
 
 // there is a problem with this approach since T needs to satisfy PartialEq, Eq for Range
 // No such restrictions are needed for Vec

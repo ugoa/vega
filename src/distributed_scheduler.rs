@@ -275,8 +275,7 @@ impl NativeScheduler for DistributedScheduler {
         let my_attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
         let event_queues = self.event_queues.clone();
         let event_queues_clone = event_queues;
-        // FIXME: probably does not need to be blocking in distributed mode; test it and change back to normal spawn
-        tokio::task::spawn_blocking(move || {
+        tokio::spawn(async move {
             while let Err(_) = TcpStream::connect(&target_executor) {
                 continue;
             }

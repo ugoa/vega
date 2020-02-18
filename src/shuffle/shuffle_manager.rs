@@ -124,7 +124,7 @@ impl ShuffleManager {
                         if let Err(err) = rt.block_on(async move {
                             let bind_addr = SocketAddr::from((bind_ip, bind_port));
                             Server::try_bind(&bind_addr.clone())
-                                .map_err(|_| ShuffleError::FreePortNotFound(bind_port))?
+                                .map_err(|_| crate::NetworkError::FreePortNotFound(bind_port, 0))?
                                 .serve(ShuffleSvcMaker)
                                 .await
                                 .map_err(|_| ShuffleError::FailedToStart)
@@ -304,6 +304,7 @@ impl<T> Service<T> for ShuffleSvcMaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::get_free_port;
     use std::io::Read;
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -316,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_ok() -> StdResult<(), Box<dyn std::error::Error + 'static>> {
-        let port = get_free_port();
+        let port = get_free_port()?;
         ShuffleManager::start_server(Some(port))?;
 
         let url = format!(
@@ -331,7 +332,7 @@ mod tests {
 
     #[test]
     fn start_failure() -> StdResult<(), Box<dyn std::error::Error + 'static>> {
-        let port = get_free_port();
+        let port = get_free_port()?;
         // bind first so it fails while trying to start
         let bind = TcpListener::bind(format!("127.0.0.1:{}", port))?;
         assert!(ShuffleManager::start_server(Some(port))
@@ -367,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_data_found() -> StdResult<(), Box<dyn std::error::Error + 'static>> {
-        let port = get_free_port();
+        let port = get_free_port()?;
         ShuffleManager::start_server(Some(port))?;
         let data = b"some random bytes".iter().copied().collect::<Vec<u8>>();
         {
@@ -388,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_data_not_found() -> StdResult<(), Box<dyn std::error::Error + 'static>> {
-        let port = get_free_port();
+        let port = get_free_port()?;
         ShuffleManager::start_server(Some(port))?;
 
         let url = format!(
@@ -404,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn not_valid_endpoint() -> StdResult<(), Box<dyn std::error::Error + 'static>> {
         use std::iter::FromIterator;
-        let port = get_free_port();
+        let port = get_free_port()?;
         ShuffleManager::start_server(Some(port))?;
 
         let url = format!(

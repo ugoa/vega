@@ -7,18 +7,15 @@ use crate::env;
 use crate::error::{Error, NetworkError, Result};
 use crate::serialized_data_capnp::serialized_data;
 use crate::task::TaskOption;
+use async_std::net::TcpListener;
 use capnp::{
     message::{Builder as MsgBuilder, HeapAllocator, Reader as CpnpReader, ReaderOptions},
     serialize::OwnedSegments,
-    serialize_packed,
 };
+use capnp_futures::serialize;
+use futures::{io::BufReader, AsyncReadExt, AsyncWriteExt, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream},
-    stream::StreamExt,
-    sync::oneshot::{channel, Receiver, Sender},
-};
+use tokio::sync::oneshot::{channel, Receiver, Sender};
 
 const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
     traversal_limit_in_words: std::u64::MAX,
@@ -61,34 +58,19 @@ impl Executor {
         let mut listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
-        while let Some(stream) = listener.incoming().next().await {
-            if let Ok(mut stream) = stream {
-                if let Ok(Signal::ShutDown) = rcv_main.try_recv() {
-                    return Err(Error::ExecutorShutdown);
-                }
-                let self_clone = Arc::clone(&self);
-                tokio::spawn(async move {
-                    let mut buf: Vec<u8> = Vec::new();
-                    let mut reader = BufReader::new(stream);
-                    reader
-                        .read_to_end(&mut buf)
-                        .await
-                        .map_err(Error::InputRead)?;
-                    let message_reader = {
-                        let mut stream_r = std::io::BufReader::new(&*buf);
-                        serialize_packed::read_message(&mut stream_r, CAPNP_BUF_READ_OPTS)
-                            .map_err(Error::CapnpDeserialization)
-                    }?;
-                    let message = {
-                        let des_task = self_clone.deserialize_task(message_reader)?;
-                        self_clone.run_task(des_task)
-                    }?;
-                    serialize_packed::write_message(&mut buf, &message);
-                    reader.write_all(&*buf).await.map_err(Error::OutputWrite)?;
-                    reader.flush().await.map_err(Error::OutputWrite)?;
-                    Ok::<(), Error>(())
-                });
+
+        while let Some(mut stream) = listener.incoming().next().await {
+            if let Ok(Signal::ShutDown) = rcv_main.try_recv() {
+                break;
             }
+            let mut stream = stream.unwrap();
+            let mut buf = BufReader::new(stream);
+            if let Some(message) = serialize::read_message(&mut buf, CAPNP_BUF_READ_OPTS).await? {
+                let des_task = self.deserialize_task(message)?;
+                let message = tokio::spawn(Arc::clone(&self).run_task(des_task)).await??;
+                serialize::write_message(&mut buf, &message);
+                buf.flush().await;
+            };
         }
         Err(Error::ExecutorShutdown)
     }
@@ -147,13 +129,13 @@ impl Executor {
         Ok(des_task)
     }
 
-    fn run_task(self: &Arc<Self>, des_task: TaskOption) -> Result<MsgBuilder<HeapAllocator>> {
+    async fn run_task(self: Arc<Self>, des_task: TaskOption) -> Result<MsgBuilder<HeapAllocator>> {
         // Run execution + serialization in parallel in the executor threadpool
         let result: Result<Vec<u8>> = {
             let start = Instant::now();
             log::debug!("executing the task from server port {}", self.port);
             //TODO change attempt id from 0 to proper value
-            let result = des_task.run(0);
+            let result = des_task.run(0).await;
             log::debug!(
                 "time taken in server for running:{} {}",
                 self.port,
@@ -188,30 +170,33 @@ impl Executor {
         let mut listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
-        let mut buf = Vec::new();
         while let Some(stream) = listener.incoming().next().await {
             let mut stream = stream.unwrap();
-            buf.clear();
-            let mut reader = BufReader::new(stream);
-            reader
-                .read_to_end(&mut buf)
-                .await
-                .map_err(Error::InputRead)?;
-            let mut stream_r = std::io::BufReader::new(&*buf);
-            let signal_data = serialize_packed::read_message(&mut stream_r, CAPNP_BUF_READ_OPTS)?;
-            let data = bincode::deserialize::<Signal>(
-                signal_data
-                    .get_root::<serialized_data::Reader>()?
-                    .get_msg()?,
-            )?;
-            if let Signal::ShutDown = data {
-                // signal shut down to the main executor task receiving thread
-                log::debug!("received shutdown signal @ {}", self.port);
-                send_child.send(Signal::ShutDown);
-                break;
-            }
+            let mut buf = BufReader::new(stream);
+            if let Some(signal_data) =
+                serialize::read_message(&mut buf, CAPNP_BUF_READ_OPTS).await?
+            {
+                let data = bincode::deserialize::<Signal>(
+                    signal_data
+                        .get_root::<serialized_data::Reader>()?
+                        .get_msg()?,
+                )?;
+                if let Signal::ShutDown = data {
+                    // signal shut down to the main executor task receiving thread
+                    log::debug!("received shutdown signal @ {}", self.port);
+                    send_child.send(Signal::ShutDown);
+                    break;
+                }
+            };
         }
         Err(Error::ExecutorShutdown)
+    }
+}
+
+impl Drop for Executor {
+    fn drop(&mut self) {
+        log::debug!("inside executor drop @ {}", self.port);
+        //TODO clean up temp local files
     }
 }
 
@@ -278,7 +263,7 @@ mod tests {
         let mut message = capnp::message::Builder::new_default();
         let mut msg_data = message.init_root::<serialized_data::Builder>();
         msg_data.set_msg(&signal);
-        serialize_packed::write_message(buf, &message);
+        serialize::write_message(buf, &message);
         Ok(())
     }
 
@@ -338,7 +323,7 @@ mod tests {
             let mut msg_data = message.init_root::<serialized_data::Builder>();
             msg_data.set_msg(&ser_task);
             let mut buf = Vec::new();
-            serialize_packed::write_message(&mut buf, &message);
+            serialize::write_message(&mut buf, &message);
 
             loop {
                 thread::sleep_ms(5);

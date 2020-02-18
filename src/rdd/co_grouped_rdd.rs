@@ -230,7 +230,7 @@ impl<K: Data + Eq + Hash> Rdd for CoGroupedRdd<K> {
                 };
 
                 let split_idx = split.get_index();
-                for (dep_num, dep) in split.deps.into_iter().enumerate() {
+                for (dep_num, dep) in split.clone().deps.into_iter().enumerate() {
                     match dep {
                         NarrowCoGroupSplitDep { rdd, split } => {
                             let iter = rdd.iterator_any(split).await;

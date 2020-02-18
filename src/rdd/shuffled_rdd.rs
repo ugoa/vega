@@ -145,23 +145,25 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> Rdd for ShuffledRdd<K, V, C> {
 
     async fn compute(&self, split: Box<dyn Split>) -> Result<ComputeResult<Self::Item>> {
         log::debug!("compute inside shuffled rdd");
-        let combiners: Arc<DashMap<K, Option<C>>> = Arc::new(DashMap::new());
-        let mut comb_clone = combiners.clone();
-        let agg = self.aggregator.clone();
-        let merge_pair = move |(k, c): (K, C)| {
-            if let Some(mut old_c) = comb_clone.get_mut(&k) {
-                let old = old_c.take().unwrap();
-                let input = ((old, c),);
-                let output = agg.merge_combiners.call(input);
-                *old_c = Some(output);
-            } else {
-                comb_clone.insert(k, Some(c));
-            }
-        };
-
         let start = Instant::now();
-        ShuffleFetcher::fetch(self.shuffle_id, split.get_index(), merge_pair).await;
+        let combiners: Arc<DashMap<K, Option<C>>> = Arc::new(DashMap::new());
+        {
+            let mut comb_clone = combiners.clone();
+            let agg = self.aggregator.clone();
+            let merge_pair = move |(k, c): (K, C)| {
+                if let Some(mut old_c) = comb_clone.get_mut(&k) {
+                    let old = old_c.take().unwrap();
+                    let input = ((old, c),);
+                    let output = agg.merge_combiners.call(input);
+                    *old_c = Some(output);
+                } else {
+                    comb_clone.insert(k, Some(c));
+                }
+            };
+            ShuffleFetcher::fetch(self.shuffle_id, split.get_index(), merge_pair).await;
+        }
         log::debug!("time taken for fetching {}", start.elapsed().as_millis());
+        let mut combiners = Arc::try_unwrap(combiners).unwrap();
         Ok(Box::new(
             combiners.into_iter().map(|(k, v)| (k, v.unwrap())),
         ))

@@ -808,7 +808,6 @@ pub trait Rdd: RddBase + 'static {
             dyn Iterator<Item = Self::Item> + Send,
         > {
             Box::new(iter.filter(|x| x.is_some()).map(|x| x.unwrap()))
-                as Box<dyn Iterator<Item = Self::Item> + Send>
         })))
     }
 }

@@ -152,11 +152,11 @@ impl ShuffleFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shuffle::get_free_port;
+    use crate::utils::get_free_port;
 
     #[tokio::test]
     async fn fetch_ok() -> StdResult<(), Box<dyn std::error::Error + 'static>> {
-        let port = get_free_port();
+        let port = get_free_port()?;
         ShuffleManager::start_server(Some(port))?;
         {
             let addr = format!("http://127.0.0.1:{}", port);
@@ -180,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_failure() -> StdResult<(), Box<dyn std::error::Error + 'static>> {
-        let port = get_free_port();
+        let port = get_free_port()?;
         ShuffleManager::start_server(Some(port))?;
         {
             let addr = format!("http://127.0.0.1:{}", port);
