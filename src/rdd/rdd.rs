@@ -829,6 +829,69 @@ pub trait Rdd: RddBase + 'static {
         ))
     }
 
+    fn zip_partitions<B, V, F>(
+        &self,
+        rdd2: Arc<dyn Rdd<Item = B>>,
+        f: F,
+        preserve_partitioning: Option<bool>,
+    ) -> SerArc<dyn Rdd<Item = V>>
+    where
+        Self: Sized,
+        B: Data,
+        V: Data,
+        F: SerFunc(
+            Box<dyn Iterator<Item = Self::Item>>,
+            Box<dyn Iterator<Item = B>>,
+        ) -> Box<dyn Iterator<Item = V>>,
+    {
+        todo!();
+    }
+
+    fn zip_partitions2<B, C, V, F>(
+        &self,
+        rdd2: Arc<dyn Rdd<Item = B>>,
+        rdd3: Arc<dyn Rdd<Item = C>>,
+        f: F,
+        preserve_partitioning: Option<bool>,
+    ) -> SerArc<dyn Rdd<Item = V>>
+    where
+        Self: Sized,
+        B: Data,
+        C: Data,
+        V: Data,
+        F: SerFunc(
+            Box<dyn Iterator<Item = Self::Item>>,
+            Box<dyn Iterator<Item = B>>,
+            Box<dyn Iterator<Item = C>>,
+        ) -> Box<dyn Iterator<Item = V>>,
+    {
+        todo!();
+    }
+
+    fn zip_partitions3<B, C, D, V, F>(
+        &self,
+        rdd2: Arc<dyn Rdd<Item = B>>,
+        rdd3: Arc<dyn Rdd<Item = C>>,
+        rdd4: Arc<dyn Rdd<Item = D>>,
+        f: F,
+        preserve_partitioning: Option<bool>,
+    ) -> SerArc<dyn Rdd<Item = V>>
+    where
+        Self: Sized,
+        B: Data,
+        C: Data,
+        D: Data,
+        V: Data,
+        F: SerFunc(
+            Box<dyn Iterator<Item = Self::Item>>,
+            Box<dyn Iterator<Item = B>>,
+            Box<dyn Iterator<Item = C>>,
+            Box<dyn Iterator<Item = D>>,
+        ) -> Box<dyn Iterator<Item = V>>,
+    {
+        todo!();
+    }
+
     fn intersection<T>(&self, other: Arc<T>) -> SerArc<dyn Rdd<Item = Self::Item>>
     where
         Self: Clone,
