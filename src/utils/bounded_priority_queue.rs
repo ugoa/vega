@@ -44,10 +44,7 @@ impl<T: Data + Ord> BoundedPriorityQueue<T> {
         }
     }
 
-    fn maybe_replace_lowest(&mut self, elem: T)
-    where
-        T: Data + Ord,
-    {
+    fn maybe_replace_lowest(&mut self, elem: T) {
         if let Some(head) = self.underlying.peek() {
             if elem.lt(head) {
                 self.underlying.pop();
