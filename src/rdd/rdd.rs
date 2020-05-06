@@ -833,7 +833,7 @@ pub trait Rdd: RddBase + 'static {
         &self,
         rdd2: Arc<dyn Rdd<Item = B>>,
         f: F,
-        preserve_partitioning: Option<bool>,
+        preserves_partitioning: Option<bool>,
     ) -> SerArc<dyn Rdd<Item = V>>
     where
         Self: Sized,
@@ -844,6 +844,7 @@ pub trait Rdd: RddBase + 'static {
             Box<dyn Iterator<Item = B>>,
         ) -> Box<dyn Iterator<Item = V>>,
     {
+        let preserves_partitioning = preserves_partitioning.unwrap_or(false);
         todo!();
     }
 
@@ -852,7 +853,7 @@ pub trait Rdd: RddBase + 'static {
         rdd2: Arc<dyn Rdd<Item = B>>,
         rdd3: Arc<dyn Rdd<Item = C>>,
         f: F,
-        preserve_partitioning: Option<bool>,
+        preserves_partitioning: Option<bool>,
     ) -> SerArc<dyn Rdd<Item = V>>
     where
         Self: Sized,
@@ -865,6 +866,7 @@ pub trait Rdd: RddBase + 'static {
             Box<dyn Iterator<Item = C>>,
         ) -> Box<dyn Iterator<Item = V>>,
     {
+        let preserves_partitioning = preserves_partitioning.unwrap_or(false);
         todo!();
     }
 
@@ -874,7 +876,7 @@ pub trait Rdd: RddBase + 'static {
         rdd3: Arc<dyn Rdd<Item = C>>,
         rdd4: Arc<dyn Rdd<Item = D>>,
         f: F,
-        preserve_partitioning: Option<bool>,
+        preserves_partitioning: Option<bool>,
     ) -> SerArc<dyn Rdd<Item = V>>
     where
         Self: Sized,
@@ -889,6 +891,7 @@ pub trait Rdd: RddBase + 'static {
             Box<dyn Iterator<Item = D>>,
         ) -> Box<dyn Iterator<Item = V>>,
     {
+        let preserves_partitioning = preserves_partitioning.unwrap_or(false);
         todo!();
     }
 
