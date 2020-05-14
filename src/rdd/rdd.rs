@@ -1133,29 +1133,26 @@ pub trait Rdd: RddBase + 'static {
         Self::Item: Data + Ord,
     {
         if num == 0 {
-            Ok(vec![])
-        } else {
-            let first_k_func = Fn!(move |partition: Box<dyn Iterator<Item = Self::Item>>|
-                -> Box<dyn Iterator<Item = BoundedPriorityQueue<Self::Item>>>  {
-                    let mut queue = BoundedPriorityQueue::new(num);
-                    partition.for_each(|item: Self::Item| queue.append(item));
-                    Box::new(std::iter::once(queue))
-            });
-
-            let queue = self
-                .map_partitions(first_k_func)
-                .reduce(Fn!(
-                    move |queue1: BoundedPriorityQueue<Self::Item>,
-                          queue2: BoundedPriorityQueue<Self::Item>|
-                          -> BoundedPriorityQueue<Self::Item> {
-                        queue1.merge(queue2)
-                    }
-                ))?
-                .ok_or_else(|| Error::Other)?
-                as BoundedPriorityQueue<Self::Item>;
-
-            Ok(queue.into())
+            return Ok(vec![]);
         }
+
+        let first_k_func = Fn!(move |partition: Box<dyn Iterator<Item = Self::Item>>|
+            -> Box<dyn Iterator<Item = BoundedPriorityQueue<Self::Item>>>  {
+                let mut queue = BoundedPriorityQueue::new(num);
+                partition.for_each(|item: Self::Item| queue.append(item));
+                Box::new(std::iter::once(queue))
+        });
+
+        let queue = self
+            .map_partitions(first_k_func)
+            .reduce(Fn!(move |queue1: BoundedPriorityQueue<Self::Item>,
+                              queue2: BoundedPriorityQueue<Self::Item>|
+                  -> BoundedPriorityQueue<Self::Item> {
+                queue1.merge(queue2)
+            }))?
+            .ok_or_else(|| Error::Other)? as BoundedPriorityQueue<Self::Item>;
+
+        Ok(queue.into())
     }
 }
 
